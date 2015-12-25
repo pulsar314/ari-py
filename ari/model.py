@@ -18,10 +18,11 @@ Stasis events relating to that object.
 """
 
 import re
-import requests
-import logging
+import json
+from tornado.gen import coroutine, Return, Future
+from tornado.log import app_log as log
 
-log = logging.getLogger(__name__)
+__all__ = []
 
 
 class Repository(object):
@@ -59,7 +60,11 @@ class Repository(object):
 
         # The returned function wraps the underlying operation, promoting the
         # received HTTP response to a first class object.
-        return lambda **kwargs: promote(self.client, oper(**kwargs), oper.json)
+        @coroutine
+        def _promote(**kwargs):
+            resp = yield oper(**kwargs)
+            raise Return(promote(self.client, resp, oper.json))
+        return _promote
 
 
 class ObjectIdGenerator(object):
@@ -142,6 +147,7 @@ class BaseObject(object):
             raise AttributeError(
                 "'%r' object has no attribute '%r'" % (self, item))
 
+        @coroutine
         def enrich_operation(**kwargs):
             """Enriches an operation by specifying parameters specifying this
             object's id (i.e., channelId=self.id), and promotes HTTP response
@@ -152,7 +158,8 @@ class BaseObject(object):
             """
             # Add id to param list
             kwargs.update(self.id_generator.get_params(self.json))
-            return promote(self.client, oper(**kwargs), oper.json)
+            resp = yield oper(**kwargs)
+            raise Return(promote(self.client, resp, oper.json))
 
         return enrich_operation
 
@@ -167,18 +174,22 @@ class BaseObject(object):
         :param kwargs: Keyword arguments to pass to fn
         """
 
-        def fn_filter(objects, event, *args, **kwargs):
+        @coroutine
+        def fn_filter(objects, event, *a, **kw):
             """Filter received events for this object.
 
             :param objects: Objects found in this event.
             :param event: Event.
             """
+            result = None
             if isinstance(objects, dict):
                 if self.id in [c.id for c in objects.values()]:
-                    fn(objects, event, *args, **kwargs)
+                    result = fn(objects, event, *a, **kw)
             else:
                 if self.id == objects.id:
-                    fn(objects, event, *args, **kwargs)
+                    result = fn(objects, event, *a, **kw)
+            if isinstance(result, Future):
+                yield result
 
         if not self.event_reg:
             msg = "Event callback registration called on object with no events"
@@ -299,7 +310,7 @@ class DeviceState(BaseObject):
 
     :param client:  ARI client.
     :type  client:  client.Client
-    :param endpoint_json: Instance data
+    :param device_state_json: Instance data
     """
     id_generator = DefaultObjectIdGenerator('deviceName', id_field='name')
 
@@ -346,12 +357,12 @@ def promote(client, resp, operation_json):
     :param client:  ARI client.
     :type  client:  client.Client
     :param resp:    HTTP resonse.
-    :type  resp:    requests.Response
+    :type  resp:    tornado.httpclient.HTTPResponse
     :param operation_json: JSON model from Swagger API.
     :type  operation_json: dict
     :return:
     """
-    resp.raise_for_status()
+    resp.rethrow()
 
     response_class = operation_json['responseClass']
     is_list = False
@@ -361,14 +372,14 @@ def promote(client, resp, operation_json):
         is_list = True
     factory = CLASS_MAP.get(response_class)
     if factory:
-        resp_json = resp.json()
+        resp_json = json.loads(resp.body)
         if is_list:
             return [factory(client, obj) for obj in resp_json]
         return factory(client, resp_json)
-    if resp.status_code == requests.codes.no_content:
+    if resp.code == 204:
         return None
     log.info("No mapping for %s; returning JSON" % response_class)
-    return resp.json()
+    return json.loads(resp.body)
 
 
 CLASS_MAP = {

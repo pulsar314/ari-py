@@ -6,13 +6,14 @@
 """
 
 import json
-import logging
 import urlparse
+from tornado.ioloop import IOLoop
+from tornado.gen import coroutine, Future
+from tornado.log import app_log as log
 import swaggerpy.client
 
-from ari.model import *
-
-log = logging.getLogger(__name__)
+from .model import Repository, Channel, Bridge, Playback, LiveRecording, \
+    StoredRecording, Endpoint, DeviceState, Sound
 
 
 class Client(object):
@@ -22,11 +23,19 @@ class Client(object):
     :param http_client: HTTP client interface.
     """
 
-    def __init__(self, base_url, http_client):
+    def __init__(self, base_url, io_loop=None, http_client=None, **kwargs):
         url = urlparse.urljoin(base_url, "ari/api-docs/resources.json")
+        if io_loop is None:
+            io_loop = IOLoop.current()
+        self.io_loop = io_loop
 
         self.swagger = swaggerpy.client.SwaggerClient(
-            url, http_client=http_client)
+                url,
+                io_loop=io_loop,
+                http_client=http_client,
+                **kwargs
+        )
+
         self.repositories = {
             name: Repository(self, name, api)
             for (name, api) in self.swagger.resources.items()}
@@ -38,10 +47,10 @@ class Client(object):
         if events:
             self.event_models = events[0]['models']
         else:
-            self.event_models = {}
+            self.event_models = dict()
 
         self.websockets = set()
-        self.event_listeners = {}
+        self.event_listeners = dict()
         self.exception_handler = \
             lambda ex: log.exception("Event listener threw exception")
 
@@ -63,7 +72,7 @@ class Client(object):
         underlying Swaggerclient.
         """
         for ws in self.websockets:
-            ws.send_close()
+            ws.close()
         self.swagger.close()
 
     def get_repo(self, name):
@@ -75,32 +84,32 @@ class Client(object):
         """
         return self.repositories.get(name)
 
-    def __run(self, ws):
-        """Drains all messages from a WebSocket, sending them to the client's
+    def __run(self, msg_str):
+        """Receives message from a WebSocket, sends them to the client's
         listeners.
-
-        :param ws: WebSocket to drain.
         """
-        # TypeChecker false positive on iter(callable, sentinel) -> iterator
-        # Fixed in plugin v3.0.1
-        # noinspection PyTypeChecker
-        for msg_str in iter(lambda: ws.recv(), None):
+        try:
             msg_json = json.loads(msg_str)
-            if not isinstance(msg_json, dict) or 'type' not in msg_json:
-                log.error("Invalid event: %s" % msg_str)
-                continue
+        except (TypeError, ValueError):
+            log.error('Invalid event: {0}'.format(msg_str))
+            return
+        if not isinstance(msg_json, dict) or 'type' not in msg_json:
+            log.error('Invalid event: {0}'.format(msg_str))
+            return
 
-            listeners = list(self.event_listeners.get(msg_json['type'], []))
-            for listener in listeners:
-                # noinspection PyBroadException
-                try:
-                    callback, args, kwargs = listener
-                    args = args or ()
-                    kwargs = kwargs or {}
-                    callback(msg_json, *args, **kwargs)
-                except Exception as e:
-                    self.exception_handler(e)
+        listeners = list(self.event_listeners.get(msg_json['type'], []))
+        for listener in listeners:
+            try:
+                callback, args, kwargs = listener
+                args = args or ()
+                kwargs = kwargs or {}
+                future = callback(msg_json, *args, **kwargs)
+                if isinstance(future, Future):
+                    self.io_loop.add_future(future, lambda f: f.result())
+            except Exception as e:
+                self.exception_handler(e)
 
+    @coroutine
     def run(self, apps):
         """Connect to the WebSocket and begin processing messages.
 
@@ -112,13 +121,9 @@ class Client(object):
         """
         if isinstance(apps, list):
             apps = ','.join(apps)
-        ws = self.swagger.events.eventWebsocket(app=apps)
+        ws = yield self.swagger.events.eventWebsocket(
+                ws_on_message=self.__run, app=apps)
         self.websockets.add(ws)
-        try:
-            self.__run(ws)
-        finally:
-            ws.close()
-            self.websockets.remove(ws)
 
     def on_event(self, event_type, event_cb, *args, **kwargs):
         """Register callback for events with given type.
@@ -141,7 +146,8 @@ class Client(object):
             """Class to allow events to be unsubscribed.
             """
 
-            def close(self):
+            @staticmethod
+            def close():
                 """Unsubscribe the associated event callback.
                 """
                 if callback_obj in client.event_listeners[event_type]:
@@ -159,7 +165,7 @@ class Client(object):
 
         :param event_type: String name of the event to register for.
         :param event_cb: Callback function
-        :type  event_cb: (Obj, dict) -> None or (dict[str, Obj], dict) ->
+        :type  event_cb: (Obj, dict) -> None or (dict[str, Obj], dict) -> None
         :param factory_fn: Function for creating Obj from JSON
         :param model_id: String id for Obj from Swagger models.
         :param args: Arguments to pass to event_cb
@@ -177,12 +183,12 @@ class Client(object):
             raise ValueError("Event model '%s' has no fields of type %s"
                              % (event_type, model_id))
 
-        def extract_objects(event, *args, **kwargs):
+        def extract_objects(event, *a, **kw):
             """Extract objects of a given type from an event.
 
             :param event: Event
-            :param args: Arguments to pass to the event callback
-            :param kwargs: Keyword arguments to pass to the event
+            :param a: Arguments to pass to the event callback
+            :param kw: Keyword arguments to pass to the event
                                       callback
             """
             # Extract the fields which are of the expected type
@@ -195,7 +201,7 @@ class Client(object):
                     obj = obj.values()[0]
                 else:
                     obj = None
-            event_cb(obj, event, *args, **kwargs)
+            event_cb(obj, event, *a, **kw)
 
         return self.on_event(event_type, extract_objects,
                              *args,
@@ -242,7 +248,8 @@ class Client(object):
 
         :param event_type: String name of the event to register for.
         :param fn: Callback function
-        :type  fn: (LiveRecording, dict) -> None or (list[LiveRecording], dict) -> None
+        :type  fn: (LiveRecording, dict) -> None or
+                   (list[LiveRecording], dict) -> None
         :param args: Arguments to pass to fn
         :param kwargs: Keyword arguments to pass to fn
         """
@@ -254,7 +261,8 @@ class Client(object):
 
         :param event_type: String name of the event to register for.
         :param fn: Callback function
-        :type  fn: (StoredRecording, dict) -> None or (list[StoredRecording], dict) -> None
+        :type  fn: (StoredRecording, dict) -> None or
+                   (list[StoredRecording], dict) -> None
         :param args: Arguments to pass to fn
         :param kwargs: Keyword arguments to pass to fn
         """
@@ -278,7 +286,8 @@ class Client(object):
 
         :param event_type: String name of the event to register for.
         :param fn: Callback function
-        :type  fn: (DeviceState, dict) -> None or (list[DeviceState], dict) -> None
+        :type  fn: (DeviceState, dict) -> None or
+                   (list[DeviceState], dict) -> None
         :param args: Arguments to pass to fn
         :param kwargs: Keyword arguments to pass to fn
         """
@@ -296,4 +305,3 @@ class Client(object):
         """
         return self.on_object_event(event_type, fn, Sound, 'Sound',
                                     *args, **kwargs)
-
