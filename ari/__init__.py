@@ -5,6 +5,7 @@
 """ARI client library
 """
 
+from tornado.httpclient import AsyncHTTPClient
 import ari.client
 
 Client = client.Client
@@ -18,4 +19,9 @@ def connect(base_url, username, password):
     :param password: ARI password.
     :return:
     """
-    return Client(base_url, auth_username=username, auth_password=password)
+    http_client = AsyncHTTPClient(
+        auth_username=username,
+        auth_password=password,
+        allow_nonstandard_methods=True,
+    )
+    return Client(base_url, http_client=http_client)

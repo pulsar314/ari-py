@@ -8,7 +8,8 @@
 import json
 import urlparse
 from tornado.ioloop import IOLoop
-from tornado.gen import coroutine, Future
+from tornado.gen import coroutine
+from tornado.concurrent import is_future
 from tornado.log import app_log as log
 import swaggerpy.client
 
@@ -23,7 +24,7 @@ class Client(object):
     :param http_client: HTTP client interface.
     """
 
-    def __init__(self, base_url, io_loop=None, http_client=None, **kwargs):
+    def __init__(self, base_url, io_loop=None, http_client=None):
         url = urlparse.urljoin(base_url, "ari/api-docs/resources.json")
         if io_loop is None:
             io_loop = IOLoop.current()
@@ -32,8 +33,7 @@ class Client(object):
         self.swagger = swaggerpy.client.SwaggerClient(
                 url,
                 io_loop=io_loop,
-                http_client=http_client,
-                **kwargs
+                http_client=http_client
         )
 
         self.repositories = {
@@ -84,30 +84,35 @@ class Client(object):
         """
         return self.repositories.get(name)
 
-    def __run(self, msg_str):
+    @coroutine
+    def __run(self, ws):
         """Receives message from a WebSocket, sends them to the client's
         listeners.
         """
-        try:
-            msg_json = json.loads(msg_str)
-        except (TypeError, ValueError):
-            log.error('Invalid event: {0}'.format(msg_str))
-            return
-        if not isinstance(msg_json, dict) or 'type' not in msg_json:
-            log.error('Invalid event: {0}'.format(msg_str))
-            return
-
-        listeners = list(self.event_listeners.get(msg_json['type'], []))
-        for listener in listeners:
+        while True:
+            msg_str = yield ws.read_message()
+            if msg_str is None:
+                break
             try:
-                callback, args, kwargs = listener
-                args = args or ()
-                kwargs = kwargs or {}
-                future = callback(msg_json, *args, **kwargs)
-                if isinstance(future, Future):
-                    self.io_loop.add_future(future, lambda f: f.result())
-            except Exception as e:
-                self.exception_handler(e)
+                msg_json = json.loads(msg_str)
+            except (TypeError, ValueError):
+                log.error('Invalid event: {0}'.format(msg_str))
+                continue
+            if not isinstance(msg_json, dict) or 'type' not in msg_json:
+                log.error('Invalid event: {0}'.format(msg_str))
+                continue
+
+            listeners = list(self.event_listeners.get(msg_json['type'], []))
+            for listener in listeners:
+                try:
+                    callback, args, kwargs = listener
+                    args = args or ()
+                    kwargs = kwargs or {}
+                    future = callback(msg_json, *args, **kwargs)
+                    if is_future(future):
+                        yield future
+                except Exception as e:
+                    self.exception_handler(e)
 
     @coroutine
     def run(self, apps):
@@ -121,9 +126,9 @@ class Client(object):
         """
         if isinstance(apps, list):
             apps = ','.join(apps)
-        ws = yield self.swagger.events.eventWebsocket(
-                ws_on_message=self.__run, app=apps)
+        ws = yield self.swagger.events.eventWebsocket(app=apps)
         self.websockets.add(ws)
+        yield self.__run(ws)
 
     def on_event(self, event_type, event_cb, *args, **kwargs):
         """Register callback for events with given type.

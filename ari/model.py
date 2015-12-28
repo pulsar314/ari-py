@@ -19,7 +19,8 @@ Stasis events relating to that object.
 
 import re
 import json
-from tornado.gen import coroutine, Return, Future
+from tornado.gen import coroutine, Return
+from tornado.concurrent import is_future
 from tornado.log import app_log as log
 
 __all__ = []
@@ -188,7 +189,7 @@ class BaseObject(object):
             else:
                 if self.id == objects.id:
                     result = fn(objects, event, *a, **kw)
-            if isinstance(result, Future):
+            if is_future(result):
                 yield result
 
         if not self.event_reg:
