@@ -20,8 +20,10 @@ def connect(base_url, username, password):
     :return:
     """
     http_client = AsyncHTTPClient(
-        auth_username=username,
-        auth_password=password,
-        allow_nonstandard_methods=True,
+        defaults=dict(
+            auth_username=username,
+            auth_password=password,
+            allow_nonstandard_methods=True,
+        )
     )
     return Client(base_url, http_client=http_client)
