@@ -6,7 +6,7 @@
 """
 
 from tornado.httpclient import AsyncHTTPClient
-import ari.client
+import tornado_ari.client
 
 Client = client.Client
 

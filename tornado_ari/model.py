@@ -20,7 +20,6 @@ Stasis events relating to that object.
 import re
 import json
 from tornado.gen import coroutine, Return
-from tornado.concurrent import is_future
 from tornado.log import app_log as log
 
 __all__ = []
@@ -47,7 +46,7 @@ class Repository(object):
         self.api = resource
 
     def __repr__(self):
-        return "Repository(%s)" % self.name
+        return 'Repository({0})'.format(self.name)
 
     def __getattr__(self, item):
         """Maps resource operations to methods on this object.
@@ -57,7 +56,7 @@ class Repository(object):
         oper = getattr(self.api, item, None)
         if not (hasattr(oper, '__call__') and hasattr(oper, 'json')):
             raise AttributeError(
-                "'%r' object has no attribute '%s'" % (self, item))
+                '"{0}" object has no attribute "{1}"'.format(self, item))
 
         # The returned function wraps the underlying operation, promoting the
         # received HTTP response to a first class object.
@@ -94,7 +93,6 @@ class ObjectIdGenerator(object):
         raise NotImplementedError("Not implemented")
 
 
-# noinspection PyDocstring
 class DefaultObjectIdGenerator(ObjectIdGenerator):
     """Id generator that works for most of our objects.
 
@@ -122,20 +120,18 @@ class BaseObject(object):
     :type  resource:    swaggerpy.client.Resource
     :param as_json: JSON representation of this object instance.
     :type  as_json: dict
-    :param event_reg:
     """
 
     id_generator = ObjectIdGenerator()
 
-    def __init__(self, client, resource, as_json, event_reg):
+    def __init__(self, client, resource, as_json):
         self.client = client
         self.api = resource
         self.json = as_json
         self.id = self.id_generator.id_as_str(as_json)
-        self.event_reg = event_reg
 
     def __repr__(self):
-        return "%s(%s)" % (self.__class__.__name__, self.id)
+        return '{0}({1})'.format(self.__class__.__name__, self.id)
 
     def __getattr__(self, item):
         """Promote resource operations related to a single resource to methods
@@ -146,7 +142,7 @@ class BaseObject(object):
         oper = getattr(self.api, item, None)
         if not (hasattr(oper, '__call__') and hasattr(oper, 'json')):
             raise AttributeError(
-                "'%r' object has no attribute '%r'" % (self, item))
+                '"{0}" object has no attribute "{1}"'.format(self, item))
 
         @coroutine
         def enrich_operation(**kwargs):
@@ -164,39 +160,25 @@ class BaseObject(object):
 
         return enrich_operation
 
-    def on_event(self, event_type, fn, *args, **kwargs):
-        """Register event callbacks for this specific domain object.
+    def on_event(self, event_type):
+        """Register event listeners for this specific domain object.
 
         :param event_type: Type of event to register for.
         :type  event_type: str
-        :param fn:  Callback function for events.
-        :type  fn:  (object, dict) -> None
-        :param args: Arguments to pass to fn
-        :param kwargs: Keyword arguments to pass to fn
+        :rtype: tornado.concurrent.Future
         """
 
-        @coroutine
-        def fn_filter(objects, event, *a, **kw):
+        def event_filter(event):
             """Filter received events for this object.
 
-            :param objects: Objects found in this event.
             :param event: Event.
             """
-            result = None
-            if isinstance(objects, dict):
-                if self.id in [c.id for c in objects.values()]:
-                    result = fn(objects, event, *a, **kw)
-            else:
-                if self.id == objects.id:
-                    result = fn(objects, event, *a, **kw)
-            if is_future(result):
-                yield result
+            for c in event.values():
+                if isinstance(c, self.__class__) and c.id == self.id:
+                    return True
+            return False
 
-        if not self.event_reg:
-            msg = "Event callback registration called on object with no events"
-            raise RuntimeError(msg)
-
-        return self.event_reg(event_type, fn_filter, *args, **kwargs)
+        return self.client.on_event(event_type, event_filter)
 
 
 class Channel(BaseObject):
@@ -211,8 +193,7 @@ class Channel(BaseObject):
 
     def __init__(self, client, channel_json):
         super(Channel, self).__init__(
-            client, client.swagger.channels, channel_json,
-            client.on_channel_event)
+            client, client.swagger.channels, channel_json)
 
 
 class Bridge(BaseObject):
@@ -227,8 +208,7 @@ class Bridge(BaseObject):
 
     def __init__(self, client, bridge_json):
         super(Bridge, self).__init__(
-            client, client.swagger.bridges, bridge_json,
-            client.on_bridge_event)
+            client, client.swagger.bridges, bridge_json)
 
 
 class Playback(BaseObject):
@@ -242,8 +222,7 @@ class Playback(BaseObject):
 
     def __init__(self, client, playback_json):
         super(Playback, self).__init__(
-            client, client.swagger.playbacks, playback_json,
-            client.on_playback_event)
+            client, client.swagger.playbacks, playback_json)
 
 
 class LiveRecording(BaseObject):
@@ -257,8 +236,7 @@ class LiveRecording(BaseObject):
 
     def __init__(self, client, recording_json):
         super(LiveRecording, self).__init__(
-            client, client.swagger.recordings, recording_json,
-            client.on_live_recording_event)
+            client, client.swagger.recordings, recording_json)
 
 
 class StoredRecording(BaseObject):
@@ -272,8 +250,7 @@ class StoredRecording(BaseObject):
 
     def __init__(self, client, recording_json):
         super(StoredRecording, self).__init__(
-            client, client.swagger.recordings, recording_json,
-            client.on_stored_recording_event)
+            client, client.swagger.recordings, recording_json)
 
 
 # noinspection PyDocstring
@@ -288,7 +265,7 @@ class EndpointIdGenerator(ObjectIdGenerator):
         }
 
     def id_as_str(self, obj_json):
-        return "%(tech)s/%(resource)s" % self.get_params(obj_json)
+        return '{tech}/{resource}'.format(**self.get_params(obj_json))
 
 
 class Endpoint(BaseObject):
@@ -302,8 +279,7 @@ class Endpoint(BaseObject):
 
     def __init__(self, client, endpoint_json):
         super(Endpoint, self).__init__(
-            client, client.swagger.endpoints, endpoint_json,
-            client.on_endpoint_event)
+            client, client.swagger.endpoints, endpoint_json)
 
 
 class DeviceState(BaseObject):
@@ -317,8 +293,7 @@ class DeviceState(BaseObject):
 
     def __init__(self, client, device_state_json):
         super(DeviceState, self).__init__(
-            client, client.swagger.deviceStates, device_state_json,
-            client.on_device_state_event)
+            client, client.swagger.deviceStates, device_state_json)
 
 
 class Sound(BaseObject):
@@ -333,7 +308,7 @@ class Sound(BaseObject):
 
     def __init__(self, client, sound_json):
         super(Sound, self).__init__(
-            client, client.swagger.sounds, sound_json, client.on_sound_event)
+            client, client.swagger.sounds, sound_json)
 
 
 class Mailbox(BaseObject):
@@ -348,7 +323,7 @@ class Mailbox(BaseObject):
 
     def __init__(self, client, mailbox_json):
         super(Mailbox, self).__init__(
-            client, client.swagger.mailboxes, mailbox_json, None)
+            client, client.swagger.mailboxes, mailbox_json)
 
 
 def promote(client, resp, operation_json):
@@ -379,7 +354,7 @@ def promote(client, resp, operation_json):
         return factory(client, resp_json)
     if resp.code == 204:
         return None
-    log.info("No mapping for %s; returning JSON" % response_class)
+    log.info('No mapping for {0}; returning JSON'.format(response_class))
     return json.loads(resp.body)
 
 
