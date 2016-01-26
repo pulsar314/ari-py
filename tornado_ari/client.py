@@ -100,9 +100,12 @@ class Client(object):
                 log.error('Invalid event: {0}'.format(msg_str))
                 continue
 
+            log.debug('Process ARI event: {0}'.format(msg_json))
             event_type = msg_json['type']
             listeners = self.event_listeners.get(event_type)
             if listeners:
+                log.debug('Listeners of event type "{0}": {1}'
+                          .format(event_type, len(listeners)))
                 # Extract objects from the event
                 event_model = self.event_models.get(event_type)
                 if not event_model:
